@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"github.com/kardianos/osext"
 
+	"io"
 )
 
 const imgroot  = "/var/lib/libvirt/images/"
@@ -82,14 +83,12 @@ func pull(name ,ver string)  {
 	}
 
 fstab:=`
-LABEL=/                 /                       ext4    defaults        0 0
+/dev/sda                /                       ext4    defaults        0 0
 tmpfs                   /dev/shm                tmpfs   defaults        0 0
 devpts                  /dev/pts                devpts  gid=5,mode=620  0 0
 sysfs                   /sys                    sysfs   defaults        0 0
 proc                    /proc                   proc    defaults        0 0`
 	fileWrite(filepath.Join(tmp,"etc/fstab"),fstab)
-	fileWrite(filepath.Join(tmp,"etc/sysconfig/network"),"")
-
 
 	if e:=runCmd("yum","install","-y","--nogpgcheck","--installroot="+tmp,"kernel","epel-release").stdio().do();e!=nil{
 
@@ -98,8 +97,14 @@ proc                    /proc                   proc    defaults        0 0`
 
 		return
 	}
-
-
+	srctimez,_:=os.Open(filepath.Join(tmp,"usr/share/zoneinfo/Asia/Shanghai"))
+	defer srctimez.Close()
+	destimez,_:=os.Create(filepath.Join(tmp,"etc/localtime"))
+	defer destimez.Close()
+	io.Copy(destimez,srctimez)
+	network:=`
+# Created by kyum`
+	fileWrite(filepath.Join(tmp,"etc/sysconfig/network"),network)
 
 	if e:=runCmd("tar","-jcf",filepath.Join(imgroot,name),".").stdio().do();e!=nil{
 		os.RemoveAll(filepath.Join(imgroot,name))
@@ -198,7 +203,7 @@ func pullto(name,templ,tag string)  {
 	imgpath:= imgroot + name
 
 
-	e:=runCmd("qemu-img","create", "-f", "qcow2", "-o", "preallocation=metadata", imgpath, "2G").do()
+	e:=runCmd("qemu-img","create", "-f", "qcow2", "-o", "preallocation=metadata", imgpath, "10G").do()
 	if e!=nil{
 		fmt.Println(e)
 		os.RemoveAll(imgpath)
@@ -232,6 +237,11 @@ func pullto(name,templ,tag string)  {
 		if len(cmd) ==0 {
 			fmt.Print("yum command:")
 			continue
+		}
+		if cmd == "chroot" {
+			if e:=runCmd("chroot",tmp).stdio().do();e!=nil{
+				fmt.Println("os error. pls pullto install")
+			}
 		}
 		if cmd == "exit"{break}
 		as:=strings.Fields(cmd)
@@ -280,7 +290,7 @@ func pullto(name,templ,tag string)  {
 	os.RemoveAll(tmp)
 
 
-	runCmd("virt-install","--name" ,name , "--ram", "512", "--disk", imgpath ,"--noautoconsole","--boot",
+	runCmd("virt-install","--name" ,name , "--ram", "512", "--disk", imgpath ,"--noautoconsole","--clock", "offset=localtime","--boot",
 			"kernel="+vmlinuzpath+",initrd="+initramfspath+",kernel_args=console=ttyS0 root=/dev/sda","--serial=pty","--noautoconsole").stdio().do()
 	runCmd("virsh","list","--all").stdio().do()
 
@@ -383,20 +393,36 @@ func main()  {
 		if len(os.Args) <3 {return}
 		runCmd("virsh","undefine","--domain",os.Args[2]).stdio().do()
 		os.RemoveAll(filepath.Join(imgroot,os.Args[2]))
+	case "rs":
+		if len(os.Args) <4 {return}
+		if !regexp.MustCompile(`\+|\-`).MatchString(os.Args[3]) {return}
+		runCmd("virsh","destroy",os.Args[2]).do()
+		runCmd("fsck","-y",filepath.Join(imgroot,os.Args[2])).do()
+		runCmd("qemu-img", "resize",filepath.Join(imgroot,os.Args[2]),os.Args[3]).do()
+		runCmd("fsck","-y",filepath.Join(imgroot,os.Args[2])).do()
+
+		c:=exec.Command("qemu-img","info",filepath.Join(imgroot,os.Args[2]))
+		out,_:=c.CombinedOutput()
+
+		resize:=regexp.MustCompile("virtual size:(.*.G)")
+		s:=resize.FindStringSubmatch(string(out))
+		runCmd("resize2fs","-f",filepath.Join(imgroot,os.Args[2]),s[1]).stdio().do()
 
 	default:
 		fmt.Println(`
-version: v0.1;el7-x86_64)
+version: v0.2;el-x86_64)
 Usage:
-	pull centos[ver.] 		exmple: kyum pull centos6.9
-	pull centos[samplename]:tag	exmple: kyum pullto centos6.9:mysql
-	mt   mount vm 			exmple: kyum mt centos6.9:mysql
-	ins  add package		exmple: kyum ins centos6.9:mysql [yum option]
-	ls   list vm			exmple: kyum ls
-	st   start vm			exmple: kyum st centos6.9:mysql  ( ctrl + ] exit )
-	co   console vm			exmple: kyum console centos6.9:mysql
-	of   stop vm			exmple: kyum stop centos6.9:mysql
-	dl   delete vm			exmple: kyum dl centos6.9:mysql
+	pull centos[ver] create  template	exmple: kyum pull centos6.9 
+	pullto centos[template name]:tag	exmple: kyum pullto centos6.9:mysql
+
+	mt   mount vm		exmple: kyum mt centos6.9:mysql
+	ins  add package	exmple: kyum ins centos6.9:mysql [yum option]
+	ls   list vm		exmple: kyum ls
+	st   start vm		exmple: kyum st centos6.9:mysql  ( ctrl + ] exit )
+	co   console vm		exmple: kyum console centos6.9:mysql
+	of   stop vm		exmple: kyum stop centos6.9:mysql
+	dl   delete vm		exmple: kyum dl centos6.9:mysql
+	rs   resize vmdisk	exmple: kyum rs centos6.0:mysql +|-10G
 		`)
 		return
 	}
